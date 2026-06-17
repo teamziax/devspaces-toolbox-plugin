@@ -20,7 +20,7 @@ data class DevWorkspace(
     val uid: String,
     val started: Boolean,
     val phase: String,
-    val cheEditor: String?,
+    val owner: String?,
     /**
      * On-disk path of every project the workspace clones, e.g.
      * `["/projects/frontend", "/projects/backend"]`. Empty when the
@@ -48,7 +48,7 @@ data class DevWorkspace(
             val metadata = resource.metadata
             val spec = resource.additionalProperties["spec"] as? Map<*, *> ?: emptyMap<String, Any>()
             val status = resource.additionalProperties["status"] as? Map<*, *> ?: emptyMap<String, Any>()
-            val cheEditor = metadata.annotations?.get("che.eclipse.org/che-editor")
+            val owner = metadata.annotations?.get("che.eclipse.org/username")
 
             return DevWorkspace(
                 namespace = metadata.namespace ?: "",
@@ -57,7 +57,7 @@ data class DevWorkspace(
                 uid = metadata.uid ?: "",
                 started = spec["started"] as? Boolean ?: false,
                 phase = status["phase"] as? String ?: "",
-                cheEditor = cheEditor,
+                owner = owner,
                 projectPaths = parseProjectPaths(spec)
             )
         }

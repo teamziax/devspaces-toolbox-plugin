@@ -37,11 +37,16 @@ class DevWorkspacesDataSource(
                 val projects = Projects(client).list()
 
                 projects
-                    .mapNotNull { it.metadata?.name }
-                    .flatMap { namespace ->
-                        DevWorkspaces(client, logger).list(namespace)
+                    .mapNotNull { project ->
+                        val namespace = project.metadata?.name ?: return@mapNotNull null
+                        val namespaceOwner = project.metadata?.annotations?.get("che.eclipse.org/username")
+                        namespace to namespaceOwner
                     }
-                    .map { workspace ->
+                    .flatMap { (namespace, namespaceOwner) ->
+                        DevWorkspaces(client, logger).list(namespace).map { it to namespaceOwner }
+                    }
+                    .map { (workspace, namespaceOwner) ->
+                        val owner = workspace.owner ?: namespaceOwner
                         EnvironmentConfig(
                             id = workspace.id,
                             name = MutableStateFlow(workspace.name),
@@ -54,7 +59,10 @@ class DevWorkspacesDataSource(
                             projectPaths = workspace.projectPaths.ifEmpty {
                                 listOf(DevWorkspace.PROJECTS_ROOT)
                             },
-                            tags = mapOf("namespace" to workspace.namespace)
+                            tags = buildMap {
+                                put("namespace", workspace.namespace)
+                                if (owner != null) put("owner", owner)
+                            }
                         )
                     }
             }
