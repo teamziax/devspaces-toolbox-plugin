@@ -3,6 +3,7 @@ plugins {
 //  `kotlin-dsl`
   id("com.redhat.devtools.toolbox.packaging")
   id("com.redhat.devtools.toolbox.install")
+  id("com.redhat.devtools.toolbox.dev")
   id("com.redhat.devtools.toolbox.publish")
   `java-library`
 }
@@ -10,7 +11,7 @@ plugins {
 // Note, the `group` value is used as a provider ID
 // when handling the URLs like `jetbrains://gateway/provider.ID`
 group = "com.redhat.devtools.toolbox"
-version = "0.0.5"
+version = "0.0.6"
 
 extra["vendor"] = "Red-Hat"
 
