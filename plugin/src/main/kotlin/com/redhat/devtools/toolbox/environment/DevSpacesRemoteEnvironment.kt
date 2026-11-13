@@ -26,6 +26,7 @@ import com.redhat.devtools.toolbox.openshift.ClusterContext
 import com.redhat.devtools.toolbox.openshift.ClusterProblem
 import com.redhat.devtools.toolbox.openshift.DevWorkspaces
 import com.redhat.devtools.toolbox.openshift.OpenShiftClientFactory
+import io.fabric8.kubernetes.api.model.Pod
 import io.fabric8.kubernetes.client.LocalPortForward
 import io.fabric8.openshift.client.OpenShiftClient
 import kotlinx.coroutines.flow.Flow
@@ -42,7 +43,8 @@ class DevSpacesRemoteEnvironment(
     private val contentsViewFactory: EnvironmentContentsViewFactory = SshEnvironmentContentsViewFactory(),
     private val localizableStringFactory: LocalizableStringFactory,
     private val logger: Logger,
-    private val clientFactory: OpenShiftClientFactory
+    private val clientFactory: OpenShiftClientFactory,
+    private val sshKey: PluginSshKey,
 ) : RemoteProviderEnvironment(initialConfig.id), BeforeConnectionHook, AfterDisconnectHook {
 
     // Mutable internal state
@@ -237,16 +239,78 @@ class DevSpacesRemoteEnvironment(
         logger.info("Port forward established: localhost:${activePortForward?.localPort} -> pod:${_currentConfig.port}")
 
 
-        // Read SSH credentials from container if not cached
-        if (SshCredentialsStore.get(initialConfig.id) == null) {
-            val sshKey = fetchSshKeyFromContainer(client, namespace, pod.metadata.name)
+        // SSH credentials: the workspace's own key if its sidecar generated one, read once, or else the plugin's,
+        // which goes into authorized_keys on every connection, in case the workspace lost it
+        val credentials = SshCredentialsStore.get(initialConfig.id) ?: run {
             val username = readFileInContainer(client, namespace, pod.metadata.name, "/sshd/username").trim()
 
             if (username.isBlank())
                 throw IllegalStateException("Failed to fetch SSH user name from container for workspace: $workspaceName")
 
-            SshCredentialsStore.save(initialConfig.id, SshCredentialsStore.Credentials(sshKey, username))
+            val workspaceKey = fetchSshKeyFromContainer(client, namespace, pod.metadata.name)
+            if (workspaceKey.isNotBlank()) {
+                SshCredentialsStore.Credentials(workspaceKey, username)
+            } else {
+                logger.info("Workspace $workspaceName has no client key: logging in with the plugin's own key")
+                SshCredentialsStore.Credentials(sshKey.privateKeyPem, username, pluginKey = true)
+            }
         }
+        if (credentials.pluginKey) {
+            installPluginKey(client, namespace, pod)
+        }
+        SshCredentialsStore.save(initialConfig.id, credentials)
+    }
+
+    /**
+     * Adds [PluginSshKey.authorizedKey] to the authorized_keys of the user sshd runs as, replacing this Toolbox's
+     * earlier line. It runs in the container sshd runs in: the one other than the sidecar's page that the sidecar's
+     * `/sshd` volume is mounted in. The home directory is the user's from the passwd file sshd reads (sshd.start
+     * writes one for nss_wrapper), as sshd finds authorized_keys there.
+     */
+    private fun installPluginKey(client: OpenShiftClient, namespace: String, pod: Pod) {
+        val container = pod.spec?.containers.orEmpty()
+            .firstOrNull { c -> c.name != PAGE_CONTAINER && c.volumeMounts.orEmpty().any { it.mountPath?.trimEnd('/') == "/sshd" } }
+            ?.name ?: PAGE_CONTAINER
+        val script = """
+            set -e
+            user=${'$'}(cat /sshd/username)
+            home=${'$'}(awk -F: -v u="${'$'}user" '${'$'}1 == u { print ${'$'}6; exit }' /var/tmp/etc/passwd /etc/passwd 2>/dev/null || true)
+            [ -n "${'$'}home" ] || home=${'$'}HOME
+            umask 077
+            mkdir -p "${'$'}home/.ssh"
+            keys="${'$'}home/.ssh/authorized_keys"
+            touch "${'$'}keys"
+            { grep -vF " ${'$'}2" "${'$'}keys" || true; printf '%s\n' "${'$'}1"; } > "${'$'}keys.toolbox"
+            mv "${'$'}keys.toolbox" "${'$'}keys"
+        """.trimIndent()
+        val (code, output) = execInContainer(
+            client, namespace, pod.metadata.name, container, "sh", "-c", script, "sh", sshKey.authorizedKey, sshKey.comment
+        )
+        if (code != 0) {
+            throw IllegalStateException("Couldn't add Toolbox's SSH key to the workspace (exit $code in $container): $output")
+        }
+        logger.info("Added Toolbox's SSH key to the workspace's authorized_keys, in container $container")
+    }
+
+    private fun execInContainer(
+        client: OpenShiftClient,
+        namespace: String,
+        podName: String,
+        container: String,
+        vararg command: String
+    ): Pair<Int, String> {
+        val output = java.io.ByteArrayOutputStream()
+        client.pods()
+            .inNamespace(namespace)
+            .withName(podName)
+            .inContainer(container)
+            .writingOutput(output)
+            .writingError(output)
+            .exec(*command)
+            .use { watch ->
+                val code = watch.exitCode().get(30, java.util.concurrent.TimeUnit.SECONDS)
+                return code to output.toString(Charsets.UTF_8).trim()
+            }
     }
 
     private fun fetchSshKeyFromContainer(
@@ -290,7 +354,7 @@ class DevSpacesRemoteEnvironment(
         client.pods()
             .inNamespace(namespace)
             .withName(podName)
-            .inContainer("jetbrains-sshd-page")
+            .inContainer(PAGE_CONTAINER)
             .writingOutput(output)
             .usingListener(object : io.fabric8.kubernetes.client.dsl.ExecListener {
                 override fun onClose(code: Int, reason: String?) { latch.countDown() }
@@ -336,7 +400,11 @@ fun EnvironmentConfig.toRemoteEnvironment(
     factory: EnvironmentContentsViewFactory = SshEnvironmentContentsViewFactory(),
     localizableStringFactory: LocalizableStringFactory,
     logger: Logger,
-    clientFactory: OpenShiftClientFactory
+    clientFactory: OpenShiftClientFactory,
+    sshKey: PluginSshKey,
 ): DevSpacesRemoteEnvironment {
-    return DevSpacesRemoteEnvironment(this, factory, localizableStringFactory, logger, clientFactory)
+    return DevSpacesRemoteEnvironment(this, factory, localizableStringFactory, logger, clientFactory, sshKey)
 }
+
+// The sidecar's landing-page container, which shares the /sshd volume with the container sshd runs in
+private const val PAGE_CONTAINER = "jetbrains-sshd-page"

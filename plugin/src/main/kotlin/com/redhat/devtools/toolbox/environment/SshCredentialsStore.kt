@@ -25,7 +25,9 @@ package com.redhat.devtools.toolbox.environment
 object SshCredentialsStore {
     data class Credentials(
         val privateKey: String,
-        val username: String
+        val username: String,
+        /** Whether [privateKey] is the plugin's own ([PluginSshKey]), which goes into authorized_keys on each connection. */
+        val pluginKey: Boolean = false,
     )
 
     private val cache = mutableMapOf<String, Credentials>()

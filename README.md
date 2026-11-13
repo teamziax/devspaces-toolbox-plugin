@@ -14,6 +14,7 @@ The plugin finds workspaces through your kubeconfig (`KUBECONFIG`, or `~/.kube/c
 - It finds Dev Spaces' namespaces by Che's `app.kubernetes.io/component=workspaces-namespace` label. It asks a cluster without any every 5 minutes.
 - When a login expires, the cluster's workspaces stay listed with a "Log in to … again" description. The plugin's menu gets a **Log in to …** action, which opens the cluster's page of `oc login` commands. `oc login --web <API server URL>` works too.
 - When you open a workspace from the dashboard and the plugin can't find it, it asks every cluster again. If the workspace still isn't there, a popup says what each cluster answered.
+- SSH uses a key, never a password. If the workspace's sshd sidecar generated a client key, the plugin uses that (che-code-sshd did until October 2026). Otherwise the plugin uses its own: it adds the public key to the workspace user's `~/.ssh/authorized_keys`, marked `devspaces-toolbox-plugin:<installation ID>`, and the private key stays in Toolbox. The newer sidecars rely on an empty password, which some images' sshd won't accept. One is the dev-tools image, whose Fedora `sshd-session` runs with `UsePAM no`.
 
 ## Developing
 Edit-run loop:

@@ -71,6 +71,7 @@ class EnvironmentRepository(
     private val localizableStringFactory: LocalizableStringFactory,
     private val clientFactory: OpenShiftClientFactory,
     private val knownClusters: KnownDevSpacesClusters = KnownDevSpacesClusters(null, logger),
+    private val sshKey: PluginSshKey = PluginSshKey(null, logger),
 ) {
     // Internal mutable state - holds the full unfiltered list
     private val _allEnvironments = MutableStateFlow<LoadableState<List<DevSpacesRemoteEnvironment>>>(
@@ -292,7 +293,7 @@ class EnvironmentRepository(
     private fun getOrCreateEnvironment(config: EnvironmentConfig): DevSpacesRemoteEnvironment {
         return environmentCache.getOrPut(config.id) {
             logger.debug("Creating new environment: ${config.id}")
-            config.toRemoteEnvironment(contentsViewFactory, localizableStringFactory, logger, clientFactory)
+            config.toRemoteEnvironment(contentsViewFactory, localizableStringFactory, logger, clientFactory, sshKey)
         }.also { existingEnv ->
             // Update config if it is changed
             if (existingEnv.getConfig() != config) {

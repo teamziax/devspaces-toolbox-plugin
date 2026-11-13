@@ -22,6 +22,7 @@ import com.jetbrains.toolbox.api.ui.ToolboxUi
 import kotlinx.coroutines.CoroutineScope
 import com.redhat.devtools.toolbox.datasource.EnvironmentDataSource
 import com.redhat.devtools.toolbox.datasource.DevWorkspacesDataSource
+import com.redhat.devtools.toolbox.environment.PluginSshKey
 import com.redhat.devtools.toolbox.openshift.OpenShiftClientFactory
 
 /**
@@ -58,6 +59,7 @@ class DevSpacesRemoteDevExtension : RemoteDevExtension {
             localizableStringFactory = localizableStringFactory,
             clientFactory  = clientFactory,
             knownClusters = KnownDevSpacesClusters(settings, logger),
+            sshKey = PluginSshKey(settings, logger),
         )
 
         // Periodically refresh environments from the data source
