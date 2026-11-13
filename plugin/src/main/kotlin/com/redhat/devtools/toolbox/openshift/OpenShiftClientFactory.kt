@@ -7,11 +7,8 @@ import io.fabric8.kubernetes.client.KubernetesClientBuilder
 import io.fabric8.kubernetes.client.utils.KubernetesSerialization
 import io.fabric8.openshift.client.OpenShiftClient
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
-import java.time.Duration
 import java.util.Optional
 import java.util.concurrent.ConcurrentHashMap
 import io.fabric8.kubernetes.api.model.Config as Kubeconfig
@@ -24,7 +21,6 @@ class OpenShiftClientFactory(
     private val logger: Logger
 ) {
     private val serialization = KubernetesSerialization()
-    private val http: HttpClient by lazy { HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build() }
     private val tokenRequestUrls = ConcurrentHashMap<String, Optional<String>>()
 
     /**
@@ -105,22 +101,26 @@ class OpenShiftClientFactory(
         return url
     }
 
+    // HttpURLConnection, not java.net.http's HttpClient: Toolbox's Java runtime has only some of the JDK's modules,
+    // and java.net.http isn't one of them
     private fun lookUpTokenRequestUrl(server: String): String? {
         return try {
-            val request = HttpRequest.newBuilder(URI.create("$server/.well-known/oauth-authorization-server"))
-                .timeout(Duration.ofSeconds(5))
-                .GET()
-                .build()
-            val response = http.send(request, HttpResponse.BodyHandlers.ofString())
-            if (response.statusCode() != 200) {
-                null
-            } else {
-                ISSUER.find(response.body())?.groupValues?.get(1)?.trimEnd('/')?.let { "$it/oauth/token/request" }
+            val connection = URI.create("$server/.well-known/oauth-authorization-server").toURL().openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 5_000
+                connection.readTimeout = 5_000
+                connection.instanceFollowRedirects = false
+                connection.setRequestProperty("Accept", "application/json")
+                if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                    null
+                } else {
+                    val body = connection.inputStream.bufferedReader().use { it.readText() }
+                    ISSUER.find(body)?.groupValues?.get(1)?.trimEnd('/')?.let { "$it/oauth/token/request" }
+                }
+            } finally {
+                connection.disconnect()
             }
         } catch (e: Exception) {
-            if (e is InterruptedException) {
-                Thread.currentThread().interrupt()
-            }
             logger.debug("No OAuth metadata from $server: ${e.message}")
             null
         }
