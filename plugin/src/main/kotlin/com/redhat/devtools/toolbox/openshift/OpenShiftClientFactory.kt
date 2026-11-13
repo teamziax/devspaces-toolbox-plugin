@@ -59,14 +59,16 @@ class OpenShiftClientFactory(
 
     /**
      * A client for [cluster], through its context. The client reads the context's token from the kubeconfig again
-     * when it's refused, so it keeps working across `oc login`s.
+     * when it's refused, so it keeps working across `oc login`s. Null options keep fabric8's defaults, which retry a
+     * failed request 10 times over about 19 seconds.
      *
      * @throws ClusterContextGoneException when the kubeconfig no longer has the context, or it points elsewhere
      */
     fun create(
         cluster: ClusterContext,
         connectionTimeoutMillis: Int? = null,
-        requestTimeoutMillis: Int? = null
+        requestTimeoutMillis: Int? = null,
+        retries: Int? = null,
     ): OpenShiftClient {
         // autoConfigure falls back to the current context when there's no context by that name
         val config = Config.autoConfigure(cluster.context)
@@ -79,6 +81,9 @@ class OpenShiftClientFactory(
         }
         if (requestTimeoutMillis != null) {
             config.setRequestTimeout(requestTimeoutMillis)
+        }
+        if (retries != null) {
+            config.setRequestRetryBackoffLimit(retries)
         }
         return try {
             KubernetesClientBuilder().withConfig(config).build().adapt(OpenShiftClient::class.java)

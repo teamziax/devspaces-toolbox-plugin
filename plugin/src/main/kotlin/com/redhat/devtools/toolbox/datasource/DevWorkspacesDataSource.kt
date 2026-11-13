@@ -45,7 +45,7 @@ class DevWorkspacesDataSource(
      */
     override suspend fun fetchEnvironments(cluster: ClusterContext): ClusterListing = withContext(Dispatchers.IO) {
         try {
-            clientFactory.create(cluster, LIST_CONNECTION_TIMEOUT_MILLIS, LIST_REQUEST_TIMEOUT_MILLIS).use { client ->
+            clientFactory.create(cluster, LIST_CONNECTION_TIMEOUT_MILLIS, LIST_REQUEST_TIMEOUT_MILLIS, LIST_RETRIES).use { client ->
                 val namespaces = Projects(client).listWorkspaceNamespaces()
                     .mapNotNull { project ->
                         val namespace = project.metadata?.name ?: return@mapNotNull null
@@ -109,8 +109,10 @@ class DevWorkspacesDataSource(
     private companion object {
         const val USERNAME_ANNOTATION = "che.eclipse.org/username"
 
-        // Short, so a cluster that doesn't answer doesn't hold the list up for long
+        // Short, and one retry rather than fabric8's 10 (about 19 seconds), so a cluster that doesn't answer doesn't
+        // hold up the list, or a dashboard link waiting for it. The next poll tries again anyway.
         const val LIST_CONNECTION_TIMEOUT_MILLIS = 5_000
         const val LIST_REQUEST_TIMEOUT_MILLIS = 15_000
+        const val LIST_RETRIES = 1
     }
 }
