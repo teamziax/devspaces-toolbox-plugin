@@ -28,6 +28,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -122,16 +126,20 @@ class EnvironmentRepository(
     /**
      * The environment with [id], after asking every cluster again if it isn't known yet. A dashboard link can arrive
      * before the first refresh is done (Toolbox starting is what opens it), or be for a cluster that's asked less
-     * often.
+     * often. It returns as soon as a cluster lists the workspace, rather than when the slowest cluster answers: a
+     * stale context's cluster can take 10 seconds to time out.
      */
     suspend fun findEnvironment(id: String): DevSpacesRemoteEnvironment? {
         environmentCache[id]?.let { return it }
-        return refreshMutex.withLock {
-            environmentCache[id] ?: run {
-                refreshLocked(force = true)
-                environmentCache[id]
-            }
-        }
+        // On the plugin's scope, so the refresh finishes even when the workspace turns up first
+        val refresh = coroutineScope.launch { refreshEnvironments(force = true) }
+        return merge<DevSpacesRemoteEnvironment?>(
+            _allEnvironments.mapNotNull { environmentCache[id] },
+            flow {
+                refresh.join()
+                emit(environmentCache[id])
+            },
+        ).first()
     }
 
     /** Whether "Show only my workspaces" hides [environment]. */
@@ -179,16 +187,22 @@ class EnvironmentRepository(
             val entry = clusters[cluster.server]
             force || entry == null || entry.cluster != cluster || now >= entry.nextCheckAt
         }
-        // In parallel, so a cluster that doesn't answer holds up only itself
-        val outcomes = supervisorScope {
-            due.map { cluster -> async { cluster to fetch(cluster) } }.awaitAll()
+        // In parallel, and each answer shows as it comes, so a cluster that doesn't answer holds up only itself
+        val answers = Mutex()
+        supervisorScope {
+            for (cluster in due) {
+                launch {
+                    val outcome = fetch(cluster)
+                    answers.withLock {
+                        val entry = clusters.getOrPut(cluster.server) { ClusterEntry(cluster) }
+                        entry.cluster = cluster
+                        record(entry, outcome, now)
+                        publish(kubeconfigClusters, complete = false)
+                    }
+                }
+            }
         }
-        for ((cluster, outcome) in outcomes) {
-            val entry = clusters.getOrPut(cluster.server) { ClusterEntry(cluster) }
-            entry.cluster = cluster
-            record(entry, outcome, now)
-        }
-        publish(kubeconfigClusters)
+        publish(kubeconfigClusters, complete = true)
     }
 
     private suspend fun fetch(cluster: ClusterContext): Outcome {
@@ -241,7 +255,7 @@ class EnvironmentRepository(
         }
     }
 
-    private fun publish(kubeconfigClusters: List<ClusterContext>) {
+    private fun publish(kubeconfigClusters: List<ClusterContext>, complete: Boolean) {
         val entries = kubeconfigClusters.mapNotNull { clusters[it.server] }
         val seen = HashSet<String>()
         val environments = entries
@@ -254,17 +268,20 @@ class EnvironmentRepository(
         // Remove environments that no longer exist
         environmentCache.keys.retainAll(seen)
 
-        // Until a cluster answers, the list is still loading, and the provider's loading text says how to log in.
-        // That includes a kubeconfig with no contexts left.
-        if (entries.any { it.answered }) {
-            val ids = environments.map { it.id }
-            if (_allEnvironments.value.takeIfValue()?.value?.map { it.id } != ids) {
-                logger.info("PLUGIN: Setting environments to ${environments.size} items: $ids")
-            }
-            _allEnvironments.value = LoadableState.Value(environments)
-        } else {
-            _allEnvironments.value = LoadableState.Loading
+        val next: LoadableState<List<DevSpacesRemoteEnvironment>> = when {
+            environments.isNotEmpty() -> LoadableState.Value(environments)
+            // Until a cluster answers, the list is still loading, and the provider's loading text says how to log in.
+            // That includes a kubeconfig with no contexts left.
+            entries.none { it.answered } -> LoadableState.Loading
+            // Rather than flash "No DevWorkspaces found" while other clusters have yet to answer
+            !complete && _allEnvironments.value.isLoading() -> LoadableState.Loading
+            else -> LoadableState.Value(environments)
         }
+        val ids = next.takeIfValue()?.value?.map { it.id }
+        if (ids != null && ids != _allEnvironments.value.takeIfValue()?.value?.map { it.id }) {
+            logger.info("PLUGIN: Setting environments to ${ids.size} items: $ids")
+        }
+        _allEnvironments.value = next
         _clusterStatuses.value = entries.map { ClusterStatus(it.cluster, it.hostsDevSpaces, it.environments.size, it.problem) }
     }
 
