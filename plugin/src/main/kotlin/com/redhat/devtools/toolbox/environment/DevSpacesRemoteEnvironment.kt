@@ -15,12 +15,15 @@ import com.jetbrains.toolbox.api.core.diagnostics.Logger
 import com.jetbrains.toolbox.api.localization.LocalizableStringFactory
 import com.jetbrains.toolbox.api.remoteDev.AfterDisconnectHook
 import com.jetbrains.toolbox.api.remoteDev.BeforeConnectionHook
+import com.jetbrains.toolbox.api.remoteDev.ConnectionCancelledException
 import com.jetbrains.toolbox.api.remoteDev.EnvironmentVisibilityState
 import com.jetbrains.toolbox.api.remoteDev.RemoteProviderEnvironment
 import com.jetbrains.toolbox.api.remoteDev.environments.EnvironmentContentsView
 import com.jetbrains.toolbox.api.remoteDev.states.EnvironmentDescription
 import com.jetbrains.toolbox.api.remoteDev.states.RemoteEnvironmentState
 import com.jetbrains.toolbox.api.remoteDev.states.StandardRemoteEnvironmentState
+import com.redhat.devtools.toolbox.openshift.ClusterContext
+import com.redhat.devtools.toolbox.openshift.ClusterProblem
 import com.redhat.devtools.toolbox.openshift.DevWorkspaces
 import com.redhat.devtools.toolbox.openshift.OpenShiftClientFactory
 import io.fabric8.kubernetes.client.LocalPortForward
@@ -44,10 +47,10 @@ class DevSpacesRemoteEnvironment(
 
     // Mutable internal state
     private var _currentConfig: EnvironmentConfig = initialConfig
+    // Why the workspace's cluster can't be used right now, if it can't
+    private var _problem: ClusterProblem? = null
     private val _state = MutableStateFlow<RemoteEnvironmentState>(StandardRemoteEnvironmentState.Active)
-    private val _description = MutableStateFlow<EnvironmentDescription>(
-        EnvironmentDescription.General(initialConfig.description?.let { localizableStringFactory.ptrl(it) })
-    )
+    private val _description = MutableStateFlow(describe(initialConfig, null))
     private var _visible: Boolean = false
 
     private val _connectionRequest = MutableStateFlow(false)
@@ -57,7 +60,9 @@ class DevSpacesRemoteEnvironment(
     private var activePortForward: LocalPortForward? = null
 
     //  Public reactive properties (observed by Toolbox UI)
-    override val secondaryInformation: String? = initialConfig.tags["owner"]
+    // The owner, and the cluster: the same workspace name can be on two clusters
+    override val secondaryInformation: String? =
+        listOfNotNull(initialConfig.tags["owner"], initialConfig.cluster?.displayName).joinToString(" · ").ifEmpty { null }
 
     override var nameFlow: MutableStateFlow<String> = _currentConfig.name
 
@@ -104,12 +109,37 @@ class DevSpacesRemoteEnvironment(
     fun updateConfig(newConfig: EnvironmentConfig) {
         require(newConfig.id == initialConfig.id) { logger.info("Cannot change environment ID for ${initialConfig.id}") }
         _currentConfig = newConfig
-        _description.update {
-            EnvironmentDescription.General(newConfig.description?.let { localizableStringFactory.ptrl(it) })
-        }
+        _description.update { describe(newConfig, _problem) }
+    }
+
+    /**
+     * Shows why the workspace's cluster can't be used right now, or clears that when [problem] is null. The state stays
+     * reachable, so the user can still try to connect: right after an `oc login` that works, before the next refresh.
+     */
+    fun showProblem(problem: ClusterProblem?) {
+        if (problem == _problem) return
+        _problem = problem
+        _state.update { if (problem == null) StandardRemoteEnvironmentState.Active else StandardRemoteEnvironmentState.Unhealthy }
+        _description.update { describe(_currentConfig, problem) }
     }
 
     fun getConfig(): EnvironmentConfig = _currentConfig
+
+    /** Whether "Show only my workspaces" keeps this workspace: it's the viewer's, or the plugin can't tell. */
+    fun belongsToViewer(): Boolean {
+        val viewer = _currentConfig.viewer ?: return true
+        val owner = _currentConfig.tags["owner"] ?: return true
+        return owner == viewer
+    }
+
+    private fun describe(config: EnvironmentConfig, problem: ClusterProblem?): EnvironmentDescription {
+        val text = when {
+            problem != null -> localizableStringFactory.pnotr(problem.summary)
+            config.description != null -> localizableStringFactory.ptrl(config.description)
+            else -> null
+        }
+        return EnvironmentDescription.General(text)
+    }
 
     override fun getBeforeConnectionHooks(): List<BeforeConnectionHook> = listOf(this)
 
@@ -126,11 +156,41 @@ class DevSpacesRemoteEnvironment(
     override fun beforeConnection() {
         logger.info("Running before connection hook for environment: ${initialConfig.id}")
 
-        val namespace = _currentConfig.tags["namespace"]
+        val config = _currentConfig
+        val workspaceName = config.name.value
+        val cluster = config.cluster
+            ?: throw ConnectionCancelledException("Toolbox doesn't know which cluster $workspaceName is on. Refresh the workspaces list, then try again.")
+        val namespace = config.tags["namespace"]
             ?: throw IllegalStateException("Namespace not found in environment config")
-        val workspaceName = _currentConfig.name.value
 
-        val client = clientFactory.create()
+        // Toolbox runs the after-disconnect hooks only when the user disconnects. When it reconnects by itself, after
+        // the network dropped or the computer slept, the last attempt's port forward still holds the local port.
+        closePortForward()
+        try {
+            connect(cluster, namespace, workspaceName)
+        } catch (e: Exception) {
+            closePortForward()
+            // So that opening the workspace from the dashboard again asks for a connection again
+            _connectionRequest.update { false }
+            throw explain(e, cluster, workspaceName)
+        }
+    }
+
+    // A problem the user can fix gets Toolbox's "connection cancelled" treatment, which shows just its message
+    private fun explain(e: Exception, cluster: ClusterContext, workspaceName: String): Exception {
+        if (e is ConnectionCancelledException) return e
+        val problem = when (val found = ClusterProblem.of(cluster, e)) {
+            is ClusterProblem.LoginRequired -> found.copy(tokenRequestUrl = clientFactory.tokenRequestUrl(cluster))
+            is ClusterProblem.Failed -> return e
+            else -> found
+        }
+        logger.warn("Can't connect to $workspaceName on ${cluster.server}: ${e.message}")
+        return ConnectionCancelledException("Can't connect to $workspaceName. ${problem.message}")
+    }
+
+    private fun connect(cluster: ClusterContext, namespace: String, workspaceName: String) {
+        logger.info("Connecting to $workspaceName in $namespace on ${cluster.server}, through context ${cluster.context}")
+        val client = clientFactory.create(cluster)
         activeClient = client
 
 
@@ -146,7 +206,7 @@ class DevSpacesRemoteEnvironment(
             }
 
             if (!started) {
-                throw IllegalStateException("Workspace $workspaceName failed to start within timeout")
+                throw ConnectionCancelledException("Workspace $workspaceName failed to start, or didn't start within 5 minutes. The Dev Spaces dashboard on ${cluster.displayName} says why.")
             }
 
             logger.info("Workspace $workspaceName is now running")
@@ -160,7 +220,7 @@ class DevSpacesRemoteEnvironment(
             .list()
             .items
             .firstOrNull()
-            ?: throw IllegalStateException("No pod found for workspace $workspaceName in namespace $namespace")
+            ?: throw ConnectionCancelledException("Workspace $workspaceName has no pod in $namespace on ${cluster.displayName}. Start it from the Dev Spaces dashboard, then connect again.")
 
         logger.info("Found pod: ${pod.metadata.name} for workspace: $workspaceName")
 
@@ -248,17 +308,21 @@ class DevSpacesRemoteEnvironment(
     }
 
     fun closePortForward() {
-        try {
-            activePortForward?.close()
-            activePortForward = null
-            logger.info("Port forward closed")
-        } catch (e: Exception) {
-            logger.debug("Error closing port forward: ${e.message}")
+        val portForward = activePortForward
+        activePortForward = null
+        if (portForward != null) {
+            try {
+                portForward.close()
+                logger.info("Port forward closed")
+            } catch (e: Exception) {
+                logger.debug("Error closing port forward: ${e.message}")
+            }
         }
 
+        val client = activeClient
+        activeClient = null
         try {
-            activeClient?.close()
-            activeClient = null
+            client?.close()
         } catch (e: Exception) {
             logger.debug("Error closing client: ${e.message}")
         }

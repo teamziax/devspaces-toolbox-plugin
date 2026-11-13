@@ -12,6 +12,7 @@
 package com.redhat.devtools.toolbox.datasource
 
 import com.redhat.devtools.toolbox.environment.EnvironmentConfig
+import com.redhat.devtools.toolbox.openshift.ClusterContext
 
 /**
  * Note: Returns [EnvironmentConfig], not [com.jetbrains.toolbox.api.remoteDev.RemoteProviderEnvironment].
@@ -26,12 +27,26 @@ import com.redhat.devtools.toolbox.environment.EnvironmentConfig
 interface EnvironmentDataSource {
 
     /**
-     * Fetches current environment configurations.
-     *
-     * @throws DataSourceException on failure
+     * The clusters to look for environments on: one per API server the user is logged in to.
      */
-    suspend fun fetchEnvironments(): List<EnvironmentConfig>
+    fun clusters(): List<ClusterContext>
+
+    /**
+     * Fetches the environment configurations on [cluster].
+     *
+     * @throws DataSourceException on failure, with the client's exception as its cause
+     */
+    suspend fun fetchEnvironments(cluster: ClusterContext): ClusterListing
 }
+
+/**
+ * What one cluster has for the user.
+ */
+data class ClusterListing(
+    val environments: List<EnvironmentConfig>,
+    /** Whether the user can see any Dev Spaces namespace on the cluster. */
+    val hostsDevSpaces: Boolean,
+)
 
 /**
  * Exception wrapper for data source errors.

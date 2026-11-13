@@ -11,11 +11,14 @@
  */
 package com.redhat.devtools.toolbox
 
+import com.jetbrains.toolbox.api.core.PluginSettingsStore
 import com.jetbrains.toolbox.api.core.ServiceLocator
 import com.jetbrains.toolbox.api.core.diagnostics.Logger
+import com.jetbrains.toolbox.api.core.os.LocalDesktopManager
 import com.jetbrains.toolbox.api.localization.LocalizableStringFactory
 import com.jetbrains.toolbox.api.remoteDev.RemoteDevExtension
 import com.jetbrains.toolbox.api.remoteDev.RemoteProvider
+import com.jetbrains.toolbox.api.ui.ToolboxUi
 import kotlinx.coroutines.CoroutineScope
 import com.redhat.devtools.toolbox.datasource.EnvironmentDataSource
 import com.redhat.devtools.toolbox.datasource.DevWorkspacesDataSource
@@ -38,6 +41,9 @@ class DevSpacesRemoteDevExtension : RemoteDevExtension {
         val logger = serviceLocator.getService(Logger::class.java)
         val coroutineScope = serviceLocator.getService(CoroutineScope::class.java)
         val localizableStringFactory = serviceLocator.getService(LocalizableStringFactory::class.java)
+        val ui = serviceLocator.getService(ToolboxUi::class.java)
+        val desktop = serviceLocator.getService(LocalDesktopManager::class.java)
+        val settings = serviceLocator.tryGetService(PluginSettingsStore::class.java)
 
         val clientFactory = OpenShiftClientFactory(logger)
 
@@ -50,14 +56,15 @@ class DevSpacesRemoteDevExtension : RemoteDevExtension {
             coroutineScope = coroutineScope,
             logger = logger,
             localizableStringFactory = localizableStringFactory,
-            clientFactory  = clientFactory
+            clientFactory  = clientFactory,
+            knownClusters = KnownDevSpacesClusters(settings, logger),
         )
 
         // Periodically refresh environments from the data source
         repository.startPolling()
 
         logger.info("DevSpacesRemoteProvider initialized with ${dataSource::class.simpleName}")
-        return DevSpacesRemoteProvider(repository, localizableStringFactory, logger, coroutineScope)
+        return DevSpacesRemoteProvider(repository, localizableStringFactory, logger, coroutineScope, ui, desktop)
     }
 
     private fun createDataSource(logger: Logger, clientFactory: OpenShiftClientFactory): EnvironmentDataSource {

@@ -35,7 +35,9 @@ DataSource → EnvironmentConfig → Repository → RemoteEnvironment → Provid
 
 - **EnvironmentRepository** (`EnvironmentRepository.kt`): Manages environment lifecycle - fetches configs from data source, caches `RemoteEnvironment` instances, exposes reactive state via `MutableStateFlow`.
 
-- **EnvironmentDataSource** (`datasource/`): Interface for fetching environment configs. `DevWorkspacesDataSource` is the real implementation.
+- **EnvironmentDataSource** (`datasource/`): Interface for fetching environment configs, one cluster at a time. `DevWorkspacesDataSource` is the real implementation.
+
+- **OpenShiftClientFactory** (`openshift/`): Reads the kubeconfig's contexts (one per API server, without running credential plugins) and makes a client per context. The repository asks every cluster, so each `EnvironmentConfig` carries the `ClusterContext` it was found on, and connecting uses that context. Failures become a `ClusterProblem`, worded for people.
 
 - **DevSpacesRemoteEnvironment** (`environment/`): Wraps `EnvironmentConfig` with Toolbox API reactive properties (state, description, connection requests).
 
@@ -46,4 +48,4 @@ DataSource → EnvironmentConfig → Repository → RemoteEnvironment → Provid
 - The `group` value in `plugin/build.gradle.kts` (`com.redhat.devtools.toolbox`) is the provider ID used in URI handling.
 - Plugin requires Java 21 (configured via `jvmToolchain(21)`).
 - Uses JetBrains Toolbox Plugin API version defined in `gradle/libs.versions.toml`.
-- Periodic environment polling is currently disabled to preserve environments received via external URLs (see TODO in `EnvironmentRepository.kt:61-67`).
+- The repository polls every 10 seconds. A cluster without Dev Spaces namespaces is asked every 5 minutes, and a failing Dev Spaces cluster every 30 seconds. A `jetbrains://` link for a workspace it doesn't know makes it ask every cluster at once.
