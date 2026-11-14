@@ -6,6 +6,16 @@ Plugin for JetBrains Toolbox enables local desktop development experience with t
 
 <img width="486" height="746" alt="image" src="https://github.com/user-attachments/assets/84e1983c-2508-4318-a7a6-dc0d4e11d787" />
 
+## Clusters and logins
+The plugin finds workspaces through your kubeconfig (`KUBECONFIG`, or `~/.kube/config`), which `oc login` writes. It looks on every cluster that has a context there, not just the current context, so workspaces on two Dev Spaces clusters show up side by side, each labelled with its cluster. Switching `oc` contexts, or logging in to another cluster, doesn't change the list.
+
+- Each workspace connects through the context it was found with.
+- Besides the current context, it uses only contexts whose credentials are a token or a certificate, as `oc login` writes them. It never runs another context's credential plugin (`exec`), which might open a browser.
+- It finds Dev Spaces' namespaces by Che's `app.kubernetes.io/component=workspaces-namespace` label. It asks a cluster without any every 5 minutes.
+- When a login expires, the cluster's workspaces stay listed with a "Log in to … again" description. The plugin's menu gets a **Log in to …** action, which opens the cluster's page of `oc login` commands. `oc login --web <API server URL>` works too.
+- When you open a workspace from the dashboard and the plugin can't find it, it asks every cluster again. If the workspace still isn't there, a popup says what each cluster answered.
+- SSH uses a key, never a password. If the workspace's sshd sidecar generated a client key, the plugin uses that (che-code-sshd did until October 2026). Otherwise the plugin uses its own: it adds the public key to the workspace user's `~/.ssh/authorized_keys`, marked `devspaces-toolbox-plugin:<installation ID>`, and the private key stays in Toolbox. The newer sidecars rely on an empty password, which some images' sshd won't accept. One is the dev-tools image, whose Fedora `sshd-session` runs with `UsePAM no`.
+
 ## Developing
 Edit-run loop:
 1. Run `./gradlew installPlugin` to build the plugin and install it directly to Toolbox.

@@ -78,16 +78,22 @@ private class WorkspaceSshConnectionInfo(
 
     override val userName: String get() = credentialsProvider()?.username ?: ""
 
+    // Key only: a workspace's sshd has no password to give. Asking for one only showed a prompt with no answer.
     override val sshConfig: String = "Host $host\n" +
             "  HostName 127.0.0.1\n" +
             "  UserKnownHostsFile /dev/null\n" +
             "  IdentitiesOnly yes\n" +
+            "  PreferredAuthentications publickey\n" +
             "  StrictHostKeyChecking no"
 
+    // Never an empty key: Toolbox names the file it saves a key to after the key's first bytes, and with none it
+    // tries to replace its ssh_keys directory itself
     override val privateKeys: List<ByteArray>
-        get() = listOf((credentialsProvider()?.privateKey ?: "").toByteArray())
+        get() = listOfNotNull(credentialsProvider()?.privateKey?.takeIf { it.isNotBlank() }?.toByteArray())
 
     override val shouldUseSystemConfiguration: Boolean = false
+
+    override val shouldAskForPassword: Boolean = false
 
     override fun equals(other: Any?): Boolean {
         // Before establishing an SSH connection to a specific environment,

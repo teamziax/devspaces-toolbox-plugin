@@ -14,6 +14,7 @@ package com.redhat.devtools.toolbox.environment
 import com.jetbrains.toolbox.api.remoteDev.states.EnvironmentDescription
 import com.jetbrains.toolbox.api.remoteDev.states.RemoteEnvironmentState
 import com.jetbrains.toolbox.api.remoteDev.states.StandardRemoteEnvironmentState
+import com.redhat.devtools.toolbox.openshift.ClusterContext
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -33,7 +34,11 @@ data class EnvironmentConfig(
     val sshKey: String? = null,
     val availableIdeProductCodes: List<String> = emptyList(),
     val projectPaths: List<String> = emptyList(),
-    val tags: Map<String, String> = emptyMap() // For metadata like "region", "type", etc.
+    val tags: Map<String, String> = emptyMap(), // For metadata like "region", "type", etc.
+    /** The cluster the workspace is on, and the kubeconfig context to reach it through. */
+    val cluster: ClusterContext? = null,
+    /** The OpenShift user the workspace was listed as, whom "Show only my workspaces" compares with its owner. */
+    val viewer: String? = null,
 )
 
 /**
